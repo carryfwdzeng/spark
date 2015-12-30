@@ -35,6 +35,7 @@ import org.apache.hadoop.hive.conf.HiveConf.ConfVars
 import org.apache.hadoop.hive.ql.metadata.Table
 import org.apache.hadoop.hive.ql.parse.VariableSubstitution
 import org.apache.hadoop.hive.serde2.io.{DateWritable, TimestampWritable}
+import org.apache.hadoop.util.VersionInfo
 
 import org.apache.spark.api.java.JavaSparkContext
 import org.apache.spark.sql.SQLConf.SQLConfEntry
@@ -211,7 +212,7 @@ class HiveContext private[hive](
     val loader = new IsolatedClientLoader(
       version = IsolatedClientLoader.hiveVersion(hiveExecutionVersion),
       execJars = Seq(),
-      config = newTemporaryConfiguration(),
+      config = newTemporaryConfiguration(useInMemoryDerby = true),
       isolationOn = false,
       baseClassLoader = Utils.getContextOrSparkClassLoader)
     loader.createClient().asInstanceOf[ClientWrapper]
@@ -288,7 +289,8 @@ class HiveContext private[hive](
       logInfo(
         s"Initializing HiveMetastoreConnection version $hiveMetastoreVersion using maven.")
       IsolatedClientLoader.forVersion(
-        version = hiveMetastoreVersion,
+        hiveMetastoreVersion = hiveMetastoreVersion,
+        hadoopVersion = VersionInfo.getVersion,
         config = allConfig,
         barrierPrefixes = hiveMetastoreBarrierPrefixes,
         sharedPrefixes = hiveMetastoreSharedPrefixes)
@@ -474,7 +476,6 @@ class HiveContext private[hive](
         catalog.CreateTables ::
         catalog.PreInsertionCasts ::
         ExtractPythonUDFs ::
-        ResolveHiveWindowFunction ::
         PreInsertCastAndRename ::
         (if (conf.runSQLOnFile) new ResolveDataSource(self) :: Nil else Nil)
 
@@ -691,11 +692,14 @@ private[hive] object HiveContext {
   val CONVERT_METASTORE_PARQUET_WITH_SCHEMA_MERGING = booleanConf(
     "spark.sql.hive.convertMetastoreParquet.mergeSchema",
     defaultValue = Some(false),
-    doc = "TODO")
+    doc = "When true, also tries to merge possibly different but compatible Parquet schemas in " +
+      "different Parquet data files. This configuration is only effective " +
+      "when \"spark.sql.hive.convertMetastoreParquet\" is true.")
 
   val CONVERT_CTAS = booleanConf("spark.sql.hive.convertCTAS",
     defaultValue = Some(false),
-    doc = "TODO")
+    doc = "When true, a table created by a Hive CTAS statement (no USING clause) will be " +
+      "converted to a data source table, using the data source set by spark.sql.sources.default.")
 
   val HIVE_METASTORE_SHARED_PREFIXES = stringSeqConf("spark.sql.hive.metastore.sharedPrefixes",
     defaultValue = Some(jdbcPrefixes),
@@ -716,10 +720,12 @@ private[hive] object HiveContext {
 
   val HIVE_THRIFT_SERVER_ASYNC = booleanConf("spark.sql.hive.thriftServer.async",
     defaultValue = Some(true),
-    doc = "TODO")
+    doc = "When set to true, Hive Thrift server executes SQL queries in an asynchronous way.")
 
   /** Constructs a configuration for hive, where the metastore is located in a temp directory. */
-  def newTemporaryConfiguration(): Map[String, String] = {
+  def newTemporaryConfiguration(useInMemoryDerby: Boolean): Map[String, String] = {
+    val withInMemoryMode = if (useInMemoryDerby) "memory:" else ""
+
     val tempDir = Utils.createTempDir()
     val localMetastore = new File(tempDir, "metastore")
     val propMap: HashMap[String, String] = HashMap()
@@ -733,7 +739,7 @@ private[hive] object HiveContext {
     }
     propMap.put(HiveConf.ConfVars.METASTOREWAREHOUSE.varname, localMetastore.toURI.toString)
     propMap.put(HiveConf.ConfVars.METASTORECONNECTURLKEY.varname,
-      s"jdbc:derby:;databaseName=${localMetastore.getAbsolutePath};create=true")
+      s"jdbc:derby:${withInMemoryMode};databaseName=${localMetastore.getAbsolutePath};create=true")
     propMap.put("datanucleus.rdbms.datastoreAdapterClassName",
       "org.datanucleus.store.rdbms.adapter.DerbyAdapter")
 
